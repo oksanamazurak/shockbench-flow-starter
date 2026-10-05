@@ -1,0 +1,19 @@
+# config.yaml
+max_iterations: 20
+checkpoint_interval: 5 # save program snapshots to disk periodically, so diffs are inspectable
+random_seed: 42
+log_level: "INFO"
+
+llm:
+  provider: "claude_code"
+  models:
+    - name: "sonnet"
+      weight: 1
+      max_tokens: 160000
+      max_budget_usd: 1 # per LLM call; dry run guardrail
+      timeout: 180
+
+evaluator:
+  timeout: 300
+  cascade_evaluation: false
+  parallel_evaluations: 1

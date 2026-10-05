@@ -1,0 +1,20 @@
+{
+  "H_extra": 8,
+  "quantiles": [0.55],
+  "future_draws": 0,
+  "demand_scale": 1.0,
+  "throughput_scale": 1.0,
+  "closure_end": true,
+  "closure_hold": true,
+  "warn_gain": 0.0,
+  "warn_lag": 1,
+  "warn_weeks": 8,
+  "threat_gain": 0.0,
+  "threat_weeks": 12,
+  "tariff_rate": 0.0,
+  "tariff_proposal_scale": 0.4,
+  "fab_energy_cap": true,
+  "base_first_fix": true,
+  "bf_passes": 1,
+  "cpu_limit": 1.2
+}

@@ -263,6 +263,40 @@ def compare(
     _scored(result, out)
 
 
+def bench(
+    *agents: str,
+    baseline: str | None = None,
+    suites: str | list[str] | None = None,
+    cpu_budget: bool = True,
+    n_jobs: int = -1,
+    out: str | None = None,
+) -> None:
+    """Agents against the naive rule on the validation benchmark (benchmarks/suites.yaml), not the leaderboard's RSS.
+
+    Each episode scores the saving (J_naive - J) / J_naive; val suites add four levels by naive's cost, stress suites
+    play harsher disruption rungs. Results are cached per episode under outputs/bench-cache/: a rerun plays only the
+    agents that changed. The dev episodes (root 0) stay for sbf evaluate / sbf compare.
+
+    Args:
+        agents: names, folders, zips or agent.py files; "naive" is the naive rule itself.
+        baseline: the agent the others are compared with (a paired 90 % interval per suite).
+        suites: comma-separated suite names (default: every suite of the manifest).
+        cpu_budget: a week over the task's CPU budget is played by the naive rule, as on the server.
+        n_jobs: joblib workers (-1: all cores).
+        out: the report's folder (default outputs/bench/<date_time>/).
+
+    """
+    from sbf_starter.bench import run
+
+    if not agents:
+        raise SystemExit("name at least one agent: uv run sbf bench mpc_lp heuristic --baseline=heuristic")
+    if isinstance(suites, str):
+        suites = [s for s in suites.split(",") if s]
+    elif isinstance(suites, tuple):
+        suites = list(suites)
+    run(list(agents), baseline=baseline, suites=suites, cpu_budget=cpu_budget, n_jobs=n_jobs, out=out, say=_say)
+
+
 def token(competition: str | None = None) -> None:
     """Get your Codabench API token from your username and password, and save it as CODABENCH_TOKEN in .env.
 
@@ -418,6 +452,7 @@ COMMANDS = {
     "compare": compare,
     "check": check,
     "pack": pack,
+    "bench": bench,
     "token": token,
     "upload": upload,
     "status": status,

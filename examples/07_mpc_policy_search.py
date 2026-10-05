@@ -6,8 +6,9 @@
 A candidate is the mpc agent's agent.py plus a params.json overriding warn_a, warn_b, msg_weight (one number
 per message kind 0-4), msg_bump, msg_bump_weeks, holding_scale, closure_power, H, tariff_bump and
 tariff_weight (one per tariff channel). Fitness is its score on your
-own root, under the CPU budget. The best is kept only if it beats the start (this session's default PARAMS) on
-the held-out dev episodes.
+own root, under the CPU budget. The best is kept only if it beats the start (this session's default PARAMS) held
+out: by default on the validation benchmark's ``<task>-val`` suite (``sbf bench``, saving vs naive, paired interval),
+so the dev episodes stay for the final ``sbf compare``; ``--holdout=dev`` compares on dev as before.
 """
 
 import json
@@ -102,7 +103,7 @@ def main(
     task: str = "tiny",
     entropy: int = 20261004,
     train_episodes: int = 16,
-    holdout: str = "dev",
+    holdout: str | None = None,
     generations: int = 10,
     population: int = 12,
     elite: int = 3,
@@ -117,7 +118,8 @@ def main(
     out = Path(out or f"outputs/07_mpc_policy_search/{time.strftime('%Y-%m-%d_%H-%M-%S')}")
     rng = np.random.default_rng(seed)
     train = scoring.episode_set(task, train_episodes, quick=quick, entropy=entropy, n_jobs=n_jobs)
-    held_out = scoring.episode_set(task, holdout, quick=quick, n_jobs=n_jobs)
+    holdout = holdout or f"{task}-val"
+    held_out = scoring.episode_set(task, "dev", quick=quick, n_jobs=n_jobs) if holdout == "dev" else None
     with tempfile.TemporaryDirectory(prefix="sbf-mpc-search-") as tmp:
         work = Path(tmp)
 
@@ -139,10 +141,21 @@ def main(
         best_score, best = max(archive, key=lambda x: x[0])
         print(f"the best candidate: training {scoring.SCALE} {best_score:.4f}")
         best_dir = write_candidate(best, work / "best")
-        cmp = held_out.compare(str(best_dir), str(write_candidate(start, work / "start")), cpu_budget=True)
-        cmp = replace(cmp, a=replace(cmp.a, agent="the best candidate"), b=replace(cmp.b, agent="current defaults"))
-        print(f"held out, on {len(held_out.episodes)} dev episodes:\n{cmp}")
-        if cmp.diff is not None and cmp.diff > 0:
+        start_dir = write_candidate(start, work / "start")
+        if held_out is not None:
+            cmp = held_out.compare(str(best_dir), str(start_dir), cpu_budget=True)
+            cmp = replace(cmp, a=replace(cmp.a, agent="the best candidate"), b=replace(cmp.b, agent="current defaults"))
+            print(f"held out, on {len(held_out.episodes)} dev episodes:\n{cmp}")
+            diff = cmp.diff
+        else:
+            from sbf_starter import bench
+
+            print(f"held out, on the validation suite {holdout} (saving vs naive):")
+            rows = bench.run(
+                [str(best_dir)], baseline=str(start_dir), suites=[holdout], n_jobs=n_jobs, out=out / "bench"
+            )
+            diff = next(r["vs_baseline"]["diff"] for r in rows if r["agent"] == str(best_dir))
+        if diff is not None and diff > 0:
             shutil.copytree(best_dir, out / "best", dirs_exist_ok=True)
             print(f"written {out / 'best'}: next, uv run sbf check {out / 'best'} --task={task}")
         else:

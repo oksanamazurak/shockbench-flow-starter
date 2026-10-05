@@ -31,6 +31,22 @@ r = es.score("path/to/folder_with_agent_py", cpu_budget=True)   # r.rss, r.rows[
 Шаблон перебору: тимчасова папка на кожен варіант (копія `agent.py` + `params.json` =
 `dict(base, **override)`), оцінка через `es.score`, вивід `rss` і суми `fallback_weeks`.
 
+## Валідаційний бенчмарк: `sbf bench`
+
+Вибір між кандидатами робиться на бенчмарку, а не на dev (dev лишається для фінального `sbf compare`).
+Набори в `benchmarks/suites.yaml`: `*-val` (інтенсивність борду, рівні за вартістю naive) і `*-stress`
+(`gamma` 0.79/0.95/0.97). Оцінка: частка економії відносно naive `(J_naive − J) / J_naive` на епізод, без
+clairvoyant плану, тобто це не RSS борду, а порядок кандидатів. Тижні, які зіграв naive (CPU-бюджет, падіння),
+показані окремо.
+
+```bash
+uv run sbf bench NEW mpc_lp --baseline=mpc_lp                      # усі набори
+uv run sbf bench NEW mpc_lp --baseline=mpc_lp --suites=small-val   # лише один
+```
+
+Результати кешуються по епізоду в `outputs/bench-cache/` (ключ: вміст папки агента), повторний запуск грає лише
+змінених агентів. Звіт: `outputs/bench/<дата>/report.md` і `report.json`.
+
 ## Перевірка, що зміна — лише рефакторинг
 
 1. До зміни: `scoring.evaluate("agents/mpc_lp", task="small", episodes=4, entropy=20261004).rss`.
@@ -62,7 +78,8 @@ o, r, done, trunc, info = env.step(a.act(o))
 
 Еволюційний пошук 16 параметрів (прогноз закриттів, ваги повідомлень, `holding_scale`,
 `closure_power`, H, тарифи). Навчання на своєму root; кандидат пишеться в
-`outputs/07_mpc_policy_search/<дата>/best`, лише якщо він кращий за поточні значення на dev.
+`outputs/07_mpc_policy_search/<дата>/best`, лише якщо він кращий за поточні значення на валідаційному наборі
+`<task>-val` (`sbf bench`); `--holdout=dev` повертає старе порівняння на dev.
 
 ```bash
 uv run python examples/07_mpc_policy_search.py --task=small --generations=8 --population=10 --train_episodes=8

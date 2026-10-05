@@ -39,8 +39,9 @@ agents/<name>/     # one submission folder per agent: agent.py and the files it 
                    #   shipped: template (send the maximum), random, heuristic (reads params.json if present)
 examples/          # 01_quickstart.py ... 08_openevolve_agent.py; ppo_agent.py is the PPO submission's agent.py
 evolve/            # OpenEvolve smoke test: tiny seed, one-episode evaluator, OpenAI config
-src/sbf_starter/   # the `sbf` CLI (cli.py), scoring.py, check.py (isolated timed run), container.py (--docker),
+src/sbf_starter/   # the `sbf` CLI (cli.py), scoring.py, bench.py (sbf bench), check.py (isolated timed run), container.py (--docker),
                    #   codabench.py (token, upload, status), agents.py (names -> folders), play.py (closures)
+benchmarks/        # suites.yaml: the validation benchmark's suites (sbf bench)
 scripts/           # fields_docs.py: regenerates docs/fields/ from the installed shockbench-flow
 docs/              # GUIDE.md, fields/ (every observation and action field), img/
                    #   mpc_lp/: the agents/mpc_lp documentation (design, parameters, experiments, pitfalls)
@@ -59,6 +60,7 @@ Always run Python through `uv run` (the locked environment). `AGENT` is a name
 | A new agent                   | `cp -r agents/template agents/mine`                                      |
 | Score locally                 | `uv run sbf evaluate mine` (`--task=small`, `--quick`, `--episodes=...`) |
 | Compare two agents            | `uv run sbf compare mine template` (a paired interval)                   |
+| Validation benchmark          | `uv run sbf bench mine mpc_lp --baseline=mpc_lp` (`--suites=small-val`; saving vs naive, not RSS) |
 | Check as the server does      | `uv run sbf check mine --task=small` (`--docker`: the real container)    |
 | Pack a zip                    | `uv run sbf pack mine` (to `outputs/mine.zip`)                           |
 | Codabench token, once         | `uv run sbf token` (the participant types the password; not an agent)   |
@@ -101,6 +103,10 @@ must respect:
   fits them.
 - `--quick` is for smoke tests: a rough naive rule, no harm levels, not the
   board's numbers.
+- To choose between candidates without fitting dev, use `uv run sbf bench` on the suites of
+  `benchmarks/suites.yaml` (val: board intensity, levels by naive's cost; stress: harsher `gamma`). It scores the
+  saving vs naive, `(J_naive − J) / J_naive`, with no clairvoyant plan: a ranking, not the board's number. Results
+  are cached per episode in `outputs/bench-cache/`; a rerun plays only changed agents.
 - `sbf check` times `act` on this machine and `--cpu_budget` meters it here; the
   server meters its own (`sbf check --docker` is the closest local copy).
 

@@ -1,0 +1,21 @@
+# The validation benchmark's suites (`uv run sbf bench AGENT...`). Docs: openspec/changes/validation-benchmark/.
+#
+# Every suite plays the naive rule beside the agents on the same scenarios and scores the saving
+# (J_naive - J) / J_naive per episode; no clairvoyant plan, so these are not the leaderboard's numbers.
+# Roots never repeat across suites and never are 0 (the dev root, kept for `sbf evaluate` / `sbf compare`)
+# nor ones already used for tuning (12345, 20261002, 20261004).
+#
+#   split   val: the board's intensity, levels by naive's cost, for choosing between candidates
+#           stress: harsher intensities, all episodes alike, for "does it break in a crisis"
+#   gamma   the disruption generator's intensity rung; null is the board's (0.62)
+#   default whether `sbf bench` runs it without --suites
+
+suites:
+  tiny-val:     {task: tiny,  split: val,    roots: [7001, 7002], episodes: 50, gamma: [null]}
+  small-val:    {task: small, split: val,    roots: [7101, 7102], episodes: 40, gamma: [null]}
+  full-val:     {task: full,  split: val,    roots: [7201],       episodes: 40, gamma: [null]}
+  tiny-stress:  {task: tiny,  split: stress, roots: [7301],       episodes: 20, gamma: [0.79, 0.95, 0.97]}
+  small-stress: {task: small, split: stress, roots: [7401],       episodes: 20, gamma: [0.79, 0.95, 0.97]}
+  full-stress:  {task: full,  split: stress, roots: [7501],       episodes: 10, gamma: [0.95]}
+
+reserved_roots: [0, 12345, 20261002, 20261004]

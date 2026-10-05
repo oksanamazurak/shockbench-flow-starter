@@ -1,0 +1,1 @@
+{"warn_a": 1.5284, "warn_b": -5.0, "msg_weight": {"0": 0.2535, "1": 0.2646, "2": 0.0986, "3": 1.0, "4": 0.2682}, "msg_bump": 0.0241, "msg_bump_weeks": 5, "closure_power": 1.0, "H": 16, "holding_scale": 1.0, "lp_scope": "all_but_grid", "upstream_floor": {"tiny": 0.8, "small": 0.0, "full": 0.0}, "terminal_scale": 0.25}

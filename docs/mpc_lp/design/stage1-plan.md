@@ -14,7 +14,7 @@
 - Load files relative to `Path(__file__).parent`; seed every RNG from `config["policy_seed"]`.
 - CPU budget: 2s/week on `small`, 4s/week on `full` (no published number for `tiny`, but `sbf check` meters it); a crashed/malformed/over-budget week is played by the naive rule on the real server — this plan's fallback exists so a solver failure degrades to the heuristic instead, not to that.
 - Per this session's instruction: **do not run `git add`/`git commit` at any step of this plan.** Steps that would normally end in a commit instead end in "stop here; do not commit" — the user commits manually, if at all.
-- Spec: `docs/superpowers/specs/2026-10-04-mpc-warning-forecast-design.md`. This plan implements Stage 1 only (no war-risk/disposal/shed/queue-lot/production modeling).
+- Spec: `docs/mpc_lp/design/stage1-spec.md`. This plan implements Stage 1 only (no war-risk/disposal/shed/queue-lot/production modeling).
 
 ## Stock-tracking rule (concrete reading of the spec's §2 stock balance, pinned down from `tiny`'s real `static`/`layout`)
 
@@ -123,7 +123,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'agent'` (the module do
 ```python
 # agents/mpc_lp/agent.py
 """Rolling-horizon LP agent (routing + timing only) with a chokepoint-closure forecast built from
-``warning.score`` and ``messages.*``. Design: docs/superpowers/specs/2026-10-04-mpc-warning-forecast-design.md.
+``warning.score`` and ``messages.*``. Design: docs/mpc_lp/design/stage1-spec.md.
 
 Stage 1 only: no war-risk surcharge, disposal/shed cost, queue-lot/release-mode mechanics, or
 fab/OSAT/grid production modeling. ``override_qty``/``release_mode`` stay at their default.

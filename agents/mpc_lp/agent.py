@@ -1,9 +1,31 @@
-"""Seed program for OpenEvolve: agents/mpc_lp/agent.py, with two EVOLVE-BLOCK regions.
+"""MPC agent for ShockBench-Flow: a weekly rolling-horizon LP plus simple rules where the LP loses.
 
-Only these two regions are mutated: ``forecast_open``'s probability combination (how warning.score and
-messages.* turn into a forecast open fraction) and ``Agent.act``'s hybrid criterion (which slots the LP
-decides versus which fall back to the plain heuristic rule). ``build_lp``'s index arithmetic is NOT a
-mutation target -- an LLM diff there is far more likely to silently corrupt the LP than to improve it.
+Full documentation: docs/mpc_lp/ (start with docs/mpc_lp/README.md). Every number quoted below is measured there.
+
+What happens each week (``Agent.act``):
+
+1. Forecast. ``forecast_open`` turns ``warning.score`` (a sigmoid) and live closure messages (``messages.*``,
+   channels sanction_legal / ties_threat / mid_threat) into each strait's open fraction for the next H weeks,
+   combined noisy-OR; week 0 is the observed value. ``tariff_forecast`` adds the expected rise a live tariff
+   announcement brings (``tariff_bump``) to the import edges of the region it names, from its effective week.
+2. Capacity. ``slot_capacity`` bounds every action slot per week: this week's capacity (persisted), zero on
+   prohibited routes and from the week a pending prohibition takes effect, derated by the forecast openness of
+   the straits on the slot's lane.
+3. LP. ``build_lp`` builds one LP over H weeks: shipments per slot, stock per tracked (node, commodity),
+   fab/OSAT production with its lead time ``tau`` (an OSAT's packages share its throughput), spill above a
+   storage cap (free at a source, ``disposal_cost`` elsewhere), demand served now and from backlog, and a
+   terminal value for what is still in the chain at the horizon's end. Costs: freight, forecast tariff, real
+   holding cost, disposal, shortage (``sinks.pi``). Grid power is in the code but off (``model_grids``).
+4. Solve with ``scipy.optimize.linprog`` (HiGHS) and keep week 0 only (rolling horizon).
+5. Hybrid. Slots carrying a grid fuel (lng, crude, nucfuel) and lanes into a grid take the heuristic rule
+   (``_fallback``: nominal capacity times the observed openness of the lane's straits), capped by the LP's own
+   week-0 capacity; other LP slots are kept at no less than ``upstream_floor`` times that rule.
+6. Fuel. Fuel slots ask for ``fuel_mult`` times their request; the environment clips to capacity and stock.
+7. Release. ``override_qty`` / ``release_mode`` stay at the default release unless ``reroute`` is on (it is off).
+
+If the LP fails or anything raises, the whole week falls back to the heuristic rule, never to the server's naive.
+Per-network values (``upstream_floor``, ``fuel_mult``) are dicts keyed by ``static["instance"]["kind"]``.
+Only the standard library, numpy and scipy are imported, as the scoring server requires.
 """
 
 import json
@@ -16,40 +38,47 @@ from scipy.optimize import linprog
 HERE = Path(__file__).resolve().parent
 
 PARAMS = {
-    "H": 6,  # rolling horizon, in weeks
-    "closure_power": 1.0,  # a lane through a forecast-derated chokepoint ships (open fraction) ** this
+    # --- LP horizon and costs -------------------------------------------------------------------------------
+    "H": 6,  # rolling horizon in weeks (params.json: 16; the wafer -> chip chain is ~14 weeks long)
+    "holding_scale": 1.0,  # multiplier on the real per-(node, k) holding_cost from static["instance"]["nodes"]
+    # what a unit still in the chain at the horizon's end is worth, as a share of its commodity's value v_k;
+    # without it a wafer shipped now (fab 8 weeks + OSAT 2 + lane, past H) is pure cost to the LP
+    "terminal_scale": 0.25,
+    # --- closure forecast (forecast_open) ---------------------------------------------------------------------
+    "closure_power": 1.0,  # a lane through a forecast-derated strait ships (open fraction) ** this
     "warn_a": 1.0,  # sigmoid slope on warning.score
     "warn_b": 2.0,  # sigmoid offset: p_warn = sigmoid(warn_a * score - warn_b)
     "msg_weight": {"0": 0.0, "1": 0.3, "2": 0.15, "3": 0.5, "4": 0.0},  # message kind -> closure weight
     "msg_bump": 0.05,  # flat weekly risk bump when a live message names no stated_effective_week
     "msg_bump_weeks": 3,  # how many weeks ahead the flat bump applies
-    "holding_scale": 1.0,
-    "lp_scope": "all_but_grid",
-    # terminal value: what a unit still in the chain at the horizon's end is worth, as a share of the commodity's
-    # published value v_k -- without it a wafer shipped now (fab 8 weeks + OSAT 2 + lane, past H) is pure cost
-    "terminal_scale": 0.25,
-    # model grid power in the LP (burn of each fuel, served base load, shed at VOLL). Off: shed is ~60% of the cost
-    # on small, but letting the LP ship fuel did worse than the heuristic's "order the nominal, let the environment
-    # clip it" on every variant tried (small train rss 0.53-0.60 vs 0.61 off; tiny ~equal), so fuel stays heuristic
-    "model_grids": False,
-    # reroute queued tanker cargo (lng, crude) at a strait around a closed strait further down its lanes, through
-    # override slots whose remaining route is open (release_mode 1); off: the default release
-    # grid fuel slots ask for this many times the heuristic's nominal request; the environment clips to capacity
-    # and stock. The heuristic's request (u0) is what binds on small -- fuel piles up at sources while grids shed
-    # (98% of shed is fuel-short weeks): dev small 0.558 -> 0.610 at 10; tiny loses 0.02 at 10, so per network
-    "fuel_mult": {"tiny": 1.0, "small": 10.0, "full": 10.0},
-    "reroute": False,
-    "reroute_open": 0.5,
-    "reroute_forecast": False,  # judge straits ahead by the forecast (True) or this week's observed openness  # a strait counts as open at or above this (forecast) open fraction
-    # LP-decided upstream slots ship at least this share of the heuristic, per network (static["instance"]["kind"]):
-    # on tiny the LP alone starves the chain ahead of shocks (train rss 0.50 at 0, 0.78 at 0.8); on small the
-    # LP alone is best (0.61 at 0, falling to 0.56 at 0.7). A number applies to every network.
-    "upstream_floor": {"tiny": 0.8, "small": 0.0, "full": 0.0},  # which slots the LP decides: "all_but_grid" or "demand" (Stage 1's rule)  # multiplier on static["instance"]["nodes"]'s real per-(node, k) holding_cost
+    # --- tariff forecast (tariff_forecast) --------------------------------------------------------------------
     # expected tariff increase per live announcement: measured on a training root (24 tiny episodes, entropy
     # 20261004), every announcement targets a region; the import tariff rose in ~45% of cases by ~0.2, so
     # ~0.085 in expectation, alike for all three channels (formal 0.079, informal 0.088, final 0.082)
     "tariff_bump": 0.085,
     "tariff_weight": {"0": 1.0, "1": 1.0, "2": 1.0},  # channel (tariff_formal, informal, final) -> weight
+    # --- which slots the LP decides (Agent.act) ---------------------------------------------------------------
+    "lp_scope": "all_but_grid",  # "all_but_grid" (grid fuels and lanes into a grid: heuristic) or "demand"
+    # LP-decided upstream slots ship at least this share of the heuristic, per network (static["instance"]["kind"]):
+    # on tiny the LP alone starves the chain ahead of shocks (train rss 0.50 at 0, 0.78 at 0.8); on small the
+    # LP alone is best (0.61 at 0, falling to 0.56 at 0.7). A plain number applies to every network.
+    "upstream_floor": {"tiny": 0.8, "small": 0.0, "full": 0.0},
+    # --- grid fuel ----------------------------------------------------------------------------------------------
+    # fuel slots ask for this many times the heuristic's nominal request; the environment clips to capacity and
+    # stock. The heuristic's request (u0) is what binds on small -- fuel piles up at sources while grids shed
+    # (98% of shed is fuel-short weeks): dev small 0.558 -> 0.610 at 10; tiny loses 0.02 at 10, so per network
+    "fuel_mult": {"tiny": 1.0, "small": 10.0, "full": 10.0},
+    # model grid power in the LP (burn of each fuel, served base load, shed at VOLL). Off: letting the LP ship fuel
+    # did worse than the heuristic's "order the nominal, let the environment clip it" on every variant tried
+    # (small train rss 0.53-0.60 vs 0.61 off; tiny ~equal), so fuel stays with the heuristic
+    "model_grids": False,
+    # --- strait release (Agent._reroute) ------------------------------------------------------------------------
+    # reroute queued tanker cargo (lng, crude) at a strait around a closed strait further down its lanes, through
+    # override slots whose remaining route is open (release_mode 1). Off: never beat the default release
+    # (small train rss 0.117 by forecast, 0.49-0.61 by observed openness, vs 0.611 off)
+    "reroute": False,
+    "reroute_open": 0.5,  # a strait counts as open at or above this open fraction
+    "reroute_forecast": False,  # judge the straits ahead by the forecast (True) or this week's observed openness
 }
 if (HERE / "params.json").is_file():
     PARAMS |= json.loads((HERE / "params.json").read_text())
@@ -681,8 +710,11 @@ class Agent:
         ]
 
     def act(self, observation):
+        """One week: steps 1-7 of the module docstring. Never raises; a failure plays the heuristic rule."""
         try:
+            # steps 1-3: forecasts, capacities and the H-week LP (build_lp calls forecast_open and slot_capacity)
             lp = build_lp(observation, self.topology, PARAMS, self.commodities_v)
+            # step 4: solve and keep week 0 only (rolling horizon)
             res = linprog(
                 lp["c"], A_eq=lp["A_eq"], b_eq=lp["b_eq"], A_ub=lp["A_ub"], b_ub=lp["b_ub"], bounds=lp["bounds"]
             )
@@ -692,18 +724,15 @@ class Agent:
             flows = np.array([res.x[ix(s, 0)] for s in range(self.topology["n_slots"])])
             heuristic_flows = self._fallback(observation)
 
+            # step 5 (hybrid): per slot, keep the LP's week-0 flow or take the heuristic rule.
+            # The LP prices only what it can trace to a cost: with fab/OSAT production modeled that is every chip
+            # and wafer shipment, but grid fuel is consumed by power we do not model (model_grids is off), so the
+            # LP would price fuel at nothing and starve the grids. Hence:
+            #   lp_scope "all_but_grid" (default): heuristic for grid-fuel slots and lanes into a grid, LP for the
+            #     rest; on small fuel reaches a grid through a terminal, so the commodity, not the lane's end, decides
+            #   lp_scope "demand" (Stage 1): LP only for lanes into a demand node
+            # EVOLVE-BLOCK markers: OpenEvolve may rewrite this block (see openevolve/mpc_initial_program.py).
             # EVOLVE-BLOCK-START
-            # Decide, per action slot, whether to trust the LP's week-0 flow or the plain heuristic rule
-            # (``heuristic_flows``). The LP only ever rewards shipments it can trace to served demand, so it
-            # correctly but unhelpfully zeroes out any slot whose lane does not reach the demand sink --
-            # confirmed to include chokepoint-crossing slots that feed a grid rather than the sink. The
-            # current rule: trust the LP only for slots whose lane destination is a demand node; everything
-            # else uses the heuristic. A different criterion (e.g. also trusting the LP where its own
-            # forecast shows meaningful risk) may do better -- this block decides, per slot ``s``, whether
-            # ``flows[s]`` keeps the LP's value or is overwritten with ``heuristic_flows[s]``.
-            # Stage 2 option: with production modeled, the LP also prices wafer/raw-chip shipments, so
-            # lp_scope="all_but_grid" trusts it everywhere but the lanes into a grid (whose lng draw is still
-            # unmodeled); lp_scope="demand" keeps the Stage 1 rule (only lanes into a demand node).
             lp_cap0 = lp["cap"][:, 0]
             all_but_grid = PARAMS.get("lp_scope", "all_but_grid") == "all_but_grid"
             for s in range(self.topology["n_slots"]):
@@ -732,12 +761,14 @@ class Agent:
                     flows[s] = min(heuristic_flows[s], lp_cap0[s])
             # EVOLVE-BLOCK-END
         except Exception:
-            flows = self._fallback(observation)
+            flows = self._fallback(observation)  # LP failed or anything raised: the heuristic rule for every slot
+        # step 6: grid fuel asks for fuel_mult x its request; the environment clips to edge capacity and stock
         mult = self._fuel_mult
-        if mult != 1.0:  # grid fuel slots: ask for mult x the heuristic (the environment clips to capacity and stock)
+        if mult != 1.0:
             for s in range(self.topology["n_slots"]):
                 if self.topology["slot_k"][s] in self.topology["grid_fuels"]:
                     flows[s] = flows[s] * mult
+        # step 7: strait release -- the default release unless reroute is on (off by default)
         override_qty, release_mode = self._zero_override, self._zero_release
         if PARAMS.get("reroute", False):
             try:

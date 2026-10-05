@@ -43,6 +43,7 @@ src/sbf_starter/   # the `sbf` CLI (cli.py), scoring.py, check.py (isolated time
                    #   codabench.py (token, upload, status), agents.py (names -> folders), play.py (closures)
 scripts/           # fields_docs.py: regenerates docs/fields/ from the installed shockbench-flow
 docs/              # GUIDE.md, fields/ (every observation and action field), img/
+                   #   mpc/: the agents/mpc documentation (design, parameters, experiments, pitfalls)
 tests/             # uv run pytest -n 3
 outputs/           # run folders outputs/<example>/<date_time>/ and packed zips (gitignored)
 ```
@@ -105,6 +106,9 @@ must respect:
 
 ## Working in this repository
 
+- Working on `agents/mpc` (the current best agent)? Read
+  [docs/mpc_lp/README.md](docs/mpc_lp/README.md) first: its design, every parameter's evidence, what was
+  already tried (`experiments.md`) and the pitfalls that cost time (`pitfalls.md`).
 - Examples are self-contained scripts: the options are the keyword arguments of
   `main`, exposed as `--flags` by `fire.Fire(main)`, with defaults that run on
   Tiny. A new experiment starts as a copy of the closest example and keeps that

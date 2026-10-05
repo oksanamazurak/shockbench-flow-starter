@@ -32,6 +32,9 @@ dependencies = [
 [project.optional-dependencies]
 # examples/05_train_ppo.py: `uv sync --extra rl`
 rl = ["shockbench-flow[rl] >= 0.1.2"]
+evolve = [
+    "openevolve>=0.4.0",
+]
 
 [project.scripts]
 sbf = "sbf_starter.cli:main"

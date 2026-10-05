@@ -1,0 +1,65 @@
+max_iterations: 10
+checkpoint_interval: 20
+random_seed: 42
+diff_based_evolution: true
+enforce_evolve_blocks: true
+max_code_length: 10000
+
+llm:
+  api_base: https://api.openai.com/v1
+  api_key: ${OPENAI_API_KEY}
+  models:
+    - name: gpt-6.1-sol
+      weight: 1.0
+  reasoning_effort: medium
+  max_tokens: 16000
+  timeout: 180
+
+prompt:
+  system_message: |
+    Change only the code between EVOLVE-BLOCK-START and EVOLVE-BLOCK-END.
+    Keep Agent.act returning {"flows": array}. Use only Python and numpy.
+    Raise combined_score. It is the mean score on 8 Small episodes:
+    0 is the naive rule, 1 is the plan that knew every disruption in advance.
+
+    self.sig.read(observation) returns these arrays. Each is one value per
+    action slot, unless the name says otherwise:
+    - ban_in: weeks until an announced sanction closes that route (inf if none)
+    - tariff_in: weeks until an announced tariff hits that route (inf if none)
+    - warning: highest early-warning score on the route's straits
+    - threat: live military and sanction threats on the route
+    - need: this week's forecast plus backlog for the sink this route delivers
+      to, or inf if the route does not end at a demand sink. Same length as flows.
+    - self.sig.demand_of_slot: sink index of each route, or -1. Routes with the
+      same index deliver to one sink and share one need.
+    - open: lowest observed open fraction of the straits on the route
+    - mask: 1 on routes allowed this week
+    - cap_now: capacity available this week
+
+    flows has one number per route. Do not hard-code that length. forecast is
+    (demands, horizon), backlog is (demands,), stock and costs have other
+    lengths. Never combine flows with forecast, backlog, stock, or costs using
+    +, * or np.minimum: that raises ValueError, the naive rule plays the week,
+    and the score falls to 0. Cap with need, which already matches flows.
+
+    Before a ban or a tariff (small ban_in or tariff_in) keep that route full and
+    let extra weeks of need through it while it is still open. Do not cut a route
+    that is about to close. When warning or threat is high and no ban or tariff
+    is close, ship less on that route and move the volume to other routes with
+    the same self.sig.demand_of_slot. Cap a calm route at need so it does not
+    oversupply. Tune RUSH, RISK, HORIZON and PREBUILD.
+  num_top_programs: 2
+  num_diverse_programs: 2
+
+database:
+  population_size: 10
+  archive_size: 5
+  num_islands: 1
+  feature_dimensions:
+    - score
+  feature_bins: 4
+
+evaluator:
+  timeout: 1800
+  cascade_evaluation: false
+  parallel_evaluations: 1

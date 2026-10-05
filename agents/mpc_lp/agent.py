@@ -32,6 +32,15 @@ PARAMS = {
     # on small, but letting the LP ship fuel did worse than the heuristic's "order the nominal, let the environment
     # clip it" on every variant tried (small train rss 0.53-0.60 vs 0.61 off; tiny ~equal), so fuel stays heuristic
     "model_grids": False,
+    # reroute queued tanker cargo (lng, crude) at a strait around a closed strait further down its lanes, through
+    # override slots whose remaining route is open (release_mode 1); off: the default release
+    # grid fuel slots ask for this many times the heuristic's nominal request; the environment clips to capacity
+    # and stock. The heuristic's request (u0) is what binds on small -- fuel piles up at sources while grids shed
+    # (98% of shed is fuel-short weeks): dev small 0.558 -> 0.610 at 10; tiny loses 0.02 at 10, so per network
+    "fuel_mult": {"tiny": 1.0, "small": 10.0, "full": 10.0},
+    "reroute": False,
+    "reroute_open": 0.5,
+    "reroute_forecast": False,  # judge straits ahead by the forecast (True) or this week's observed openness  # a strait counts as open at or above this (forecast) open fraction
     # LP-decided upstream slots ship at least this share of the heuristic, per network (static["instance"]["kind"]):
     # on tiny the LP alone starves the chain ahead of shocks (train rss 0.50 at 0, 0.78 at 0.8); on small the
     # LP alone is best (0.61 at 0, falling to 0.56 at 0.7). A number applies to every network.
@@ -625,6 +634,8 @@ class Agent:
     def __init__(self, config=None):
         static, layout = config["static"], config["layout"]
         self.topology = build_topology(static, layout)
+        fm = PARAMS.get("fuel_mult", 1.0)
+        self._fuel_mult = float(fm.get(static["instance"]["kind"], 1.0) if isinstance(fm, dict) else fm)
         floor = PARAMS.get("upstream_floor", 0.0)
         self._upstream_floor = float(floor.get(static["instance"]["kind"], 0.0) if isinstance(floor, dict) else floor)
         self.commodities_v = np.asarray(static["commodities"]["v"], dtype=float)
@@ -632,6 +643,30 @@ class Agent:
         action = config["spaces"]["action"]
         self._zero_override = np.zeros(action["override_qty"]["shape"])
         self._zero_release = np.zeros(action["release_mode"]["shape"], dtype=np.int64)
+
+        # reroute: per release pair (strait c, tanker commodity k), its override slots with the straits each slot's
+        # lane passes after c (the route the released cargo still has ahead)
+        lanes_ck = static["lanes"]["chokepoints"]
+        ov = static["override_slots"]
+        self._pairs = [tuple(p) for p in layout["release_pairs"]]
+        pair_index = {p: i for i, p in enumerate(self._pairs)}
+        self._pair_slots = [[] for _ in self._pairs]  # per pair: (override slot, straits ahead)
+        self._pair_lane_ahead = [[] for _ in self._pairs]  # per pair: straits ahead on every lane through c
+        for o in range(len(ov["chokepoint"])):
+            c, k, lane = ov["chokepoint"][o], ov["k"][o], ov["lane"][o]
+            ahead = []
+            if lane is not None:
+                chain = list(lanes_ck[lane])
+                ahead = chain[chain.index(c) + 1:] if c in chain else []
+            pi = pair_index.get((c, k))
+            if pi is not None:
+                self._pair_slots[pi].append((o, ahead))
+        for pi, (c, k) in enumerate(self._pairs):
+            for lane, chain in enumerate(lanes_ck):
+                chain = list(chain)
+                if c in chain:
+                    self._pair_lane_ahead[pi].append(chain[chain.index(c) + 1:])
+        self._n_override = len(ov["chokepoint"])
 
         # the fallback rule: agents/heuristic's persist + closure_power derate, self-contained here so a
         # solver failure never depends on the LP machinery that just failed
@@ -698,7 +733,55 @@ class Agent:
             # EVOLVE-BLOCK-END
         except Exception:
             flows = self._fallback(observation)
-        return {"flows": flows, "override_qty": self._zero_override, "release_mode": self._zero_release}
+        mult = self._fuel_mult
+        if mult != 1.0:  # grid fuel slots: ask for mult x the heuristic (the environment clips to capacity and stock)
+            for s in range(self.topology["n_slots"]):
+                if self.topology["slot_k"][s] in self.topology["grid_fuels"]:
+                    flows[s] = flows[s] * mult
+        override_qty, release_mode = self._zero_override, self._zero_release
+        if PARAMS.get("reroute", False):
+            try:
+                override_qty, release_mode = self._reroute(observation)
+            except Exception:
+                override_qty, release_mode = self._zero_override, self._zero_release
+        return {"flows": flows, "override_qty": override_qty, "release_mode": release_mode}
+
+    def _reroute(self, observation):
+        """Release queued tanker cargo at an open strait onto override slots whose route ahead is open, when some
+        lane through that strait runs into a closed one; the simulator clips the quantity to the queue, the out-edge
+        capacity and the strait's throughput. Openness: the forecast over the next weeks (minimum), not just now.
+        """
+        H = int(PARAMS["H"])
+        fc = forecast_open(observation, self.topology, H, PARAMS)
+        pos = self.topology["chokepoint_pos"]
+        thr = float(PARAMS.get("reroute_open", 0.5))
+        look = min(H, 4)
+
+        use_fc = bool(PARAMS.get("reroute_forecast", False))
+
+        def is_open(node):
+            if node not in pos:
+                return True
+            if use_fc:
+                return float(np.min(fc[node][:look])) >= thr
+            return float(observation["graph_now.open"][pos[node]]) >= thr  # observed this week
+
+        mask = observation["override_mask"]
+        qty = np.zeros(self._n_override)
+        mode = np.zeros(len(self._pairs), dtype=np.int64)
+        for pi, (c, _k) in enumerate(self._pairs):
+            if c in pos and float(observation["graph_now.open"][pos[c]]) < thr:
+                continue  # nothing leaves a closed strait anyway
+            blocked = any(not all(is_open(n) for n in ahead) for ahead in self._pair_lane_ahead[pi])
+            if not blocked:
+                continue
+            good = [o for o, ahead in self._pair_slots[pi] if mask[o] == 1 and all(is_open(n) for n in ahead)]
+            if not good:
+                continue
+            mode[pi] = 1
+            for o in good:
+                qty[o] = 1e12
+        return qty, mode
 
     def _fallback(self, observation):
         flows = self._fallback_cap * observation["action_mask"]

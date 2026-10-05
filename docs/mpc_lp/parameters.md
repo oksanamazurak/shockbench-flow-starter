@@ -1,4 +1,4 @@
-# Параметри `agents/mpc`
+# Параметри `agents/mpc_lp`
 
 Значення за замовчуванням задані в `PARAMS` у `agents/mpc_lp/agent.py`. `agents/mpc_lp/params.json`
 їх перекриває (`PARAMS |= json.load(...)` при імпорті модуля). Чинне значення — з `params.json`,

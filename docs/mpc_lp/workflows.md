@@ -6,8 +6,8 @@
 ## Оцінка й порівняння
 
 ```bash
-uv run sbf evaluate mpc --task=small                  # оцінка на 20 dev episodes
-uv run sbf evaluate mpc --task=small --quick          # швидкий smoke-тест (не цифри борду)
+uv run sbf evaluate mpc_lp --task=small                  # оцінка на 20 dev episodes
+uv run sbf evaluate mpc_lp --task=small --quick          # швидкий smoke-тест (не цифри борду)
 uv run sbf compare NEW OLD --task=small               # парне порівняння; виграш, якщо інтервал не містить 0
 uv run sbf compare NEW OLD --task=full --episodes=6   # full дорогий: еталони рахуються довго
 ```
@@ -17,7 +17,7 @@ uv run sbf compare NEW OLD --task=full --episodes=6   # full дорогий: е�
 ```bash
 mkdir -p /tmp/mpc_old && git show 715f9ed:agents/mpc_lp/agent.py > /tmp/mpc_old/agent.py \
   && git show 715f9ed:agents/mpc_lp/params.json > /tmp/mpc_old/params.json
-uv run sbf compare mpc /tmp/mpc_old --task=small
+uv run sbf compare mpc_lp /tmp/mpc_old --task=small
 ```
 
 Оцінка на тренувальному root у Python (для перебору налаштувань):
@@ -33,7 +33,7 @@ r = es.score("path/to/folder_with_agent_py", cpu_budget=True)   # r.rss, r.rows[
 
 ## Перевірка, що зміна — лише рефакторинг
 
-1. До зміни: `scoring.evaluate("agents/mpc", task="small", episodes=4, entropy=20261004).rss`.
+1. До зміни: `scoring.evaluate("agents/mpc_lp", task="small", episodes=4, entropy=20261004).rss`.
 2. Після зміни — те саме; результат має збігатися до останнього знака (зараз **0.6316986377034457**).
 3. Для `PARAMS`: порівняти словник до і після, виконавши код до рядка `if (HERE / "params.json")`.
 
@@ -102,22 +102,22 @@ uv run openevolve-run openevolve/mpc_initial_program.py openevolve/mpc_evaluator
 ```bash
 uv run pytest tests/test_mpc_agent.py -q        # 11 тестів агента
 uv run pytest -n 3                              # усі тести репо (3 пропущені потребують Docker)
-uv run sbf check mpc --task=small               # імпорти, zip, CPU на тиждень; також --task=full
+uv run sbf check mpc_lp --task=small               # імпорти, zip, CPU на тиждень; також --task=full
 ```
 
 ## Пакування й заливання (лише на прохання користувача)
 
 ```bash
-uv run sbf pack mpc                             # -> outputs/mpc.zip (агент + params.json)
-uv run sbf upload outputs/mpc.zip --dry_run     # перевірка без заливання
-uv run sbf upload outputs/mpc.zip               # справжнє заливання: 1 з 5 спроб на день
+uv run sbf pack mpc_lp                             # -> outputs/mpc_lp.zip (агент + params.json)
+uv run sbf upload outputs/mpc_lp.zip --dry_run     # перевірка без заливання
+uv run sbf upload outputs/mpc_lp.zip               # справжнє заливання: 1 з 5 спроб на день
 uv run sbf status 962063 --wait                 # дочекатися оцінки
 ```
 
 - Потрібен `.env` з `CODABENCH_COMPETITION` (URL змагання; competition 18290) і `CODABENCH_TOKEN`.
 - `uv run sbf token` питає логін і пароль інтерактивно: запускати у звичайному терміналі, а не
   через `!` у Claude Code (там нема stdin, буде `EOFError`).
-- Заливати zip, зібраний із закоміченого стану, і звіряти: `unzip -p outputs/mpc.zip agent.py | diff - agents/mpc_lp/agent.py`.
+- Заливати zip, зібраний із закоміченого стану, і звіряти: `unzip -p outputs/mpc_lp.zip agent.py | diff - agents/mpc_lp/agent.py`.
 - `__pycache__` у zip не потрапляє.
 
 ## Коміти

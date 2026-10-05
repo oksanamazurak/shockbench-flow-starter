@@ -1,4 +1,4 @@
-"""An evolutionary search over agents/mpc's forecast and LP parameters (same method as 06_policy_search.py).
+"""An evolutionary search over agents/mpc_lp's forecast and LP parameters (same method as 06_policy_search.py).
 
     uv run python examples/07_mpc_policy_search.py
     uv run python examples/07_mpc_policy_search.py --task=small --generations=10 --population=12
@@ -24,7 +24,7 @@ from sbf_starter import scoring
 from sbf_starter.agents import resolve
 
 
-MPC = resolve("mpc") / "agent.py"
+MPC = resolve("mpc_lp") / "agent.py"
 # order: warn_a, warn_b, msg_weight[0..4], msg_bump, msg_bump_weeks, holding_scale, closure_power, H,
 #        tariff_bump, tariff_weight[0..2]
 LOWER = np.array([0.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0])

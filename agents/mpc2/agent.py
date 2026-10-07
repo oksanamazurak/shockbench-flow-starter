@@ -74,6 +74,13 @@ TINY_OVERRIDES = {
     "cpu_limit": 1.55,
 }
 
+# Full's LP is big: the base-first re-solves took a median 2.3 s a week and up to 12 s, so about 12 % of Full's weeks
+# went over the 4 s budget and were played by naive. Without them the median is 0.32 s and dev Full scores 0.449
+# against 0.407 (20 episodes, CPU budget on); Tiny and Small keep their settings.
+FULL_OVERRIDES = {
+    "bf_passes": 0,
+}
+
 
 def _seen(obs, key):
     return obs[f"{key}.observed"] == 1
@@ -544,8 +551,11 @@ class Agent:
     def __init__(self, config=None, params=None):
         if params is None:
             self.params = {**PARAMS}
-            if int((config or {}).get("T") or 52) <= 30:
+            T = int((config or {}).get("T") or 52)
+            if T <= 30:
                 self.params.update(TINY_OVERRIDES)
+            elif T > 60:
+                self.params.update(FULL_OVERRIDES)
         else:
             self.params = {**DEFAULTS, **params}
         LP.FAB_ENERGY_CAP = bool(self.params["fab_energy_cap"])

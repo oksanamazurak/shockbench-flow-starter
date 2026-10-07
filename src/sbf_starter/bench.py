@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 import zipfile
 from dataclasses import dataclass
@@ -32,6 +33,10 @@ NAIVE = "naive"
 LEVEL_QUANTILES = (0.50, 0.80, 0.95)  # naive-cost cut points of the four val levels (the board's 50/30/15/5 % mix)
 BOOTSTRAP, CONFIDENCE, SEED = 2000, 0.90, 0
 FQ_REPLICATIONS = 1000  # the leaderboard's naive demand-model replications
+# With the CPU budget on, every worker shares the machine: 24 workers on this 16-core hybrid CPU made mpc2 lose 3687 of
+# 4160 Full weeks to naive, against 240 of 2080 alone (sbf evaluate). A third of the logical cores keeps the meter
+# honest (8 workers: 165 of 1040, close to its 12 % alone).
+METERED_WORKERS = max(1, (os.cpu_count() or 3) // 3)
 
 
 # ----- manifest ------------------------------------------------------------------------------------------------------
@@ -338,6 +343,9 @@ def run(
     base = next((p for p in players if p.label == baseline), None)
     every = [*([] if any(p.key == NAIVE for p in players) else [player(NAIVE)]), *players]
     picked = [known[s] for s in chosen]
+    if cpu_budget and n_jobs == -1:
+        n_jobs = METERED_WORKERS
+        say(f"CPU budget on: {n_jobs} workers, so that the agents do not slow each other down (--n_jobs to change)")
     found = results(every, picked, cpu_budget=cpu_budget, n_jobs=n_jobs, say=say)
     rows = table(players, picked, found, base)
     text = markdown(rows, cpu_budget)

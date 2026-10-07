@@ -282,7 +282,8 @@ def bench(
         baseline: the agent the others are compared with (a paired 90 % interval per suite).
         suites: comma-separated suite names (default: every suite of the manifest).
         cpu_budget: a week over the task's CPU budget is played by the naive rule, as on the server.
-        n_jobs: joblib workers (-1: all cores).
+        n_jobs: joblib workers (-1: all cores, or a third of them with the CPU budget on, so that the agents do not
+            slow each other down and lose weeks to naive).
         out: the report's folder (default outputs/bench/<date_time>/).
 
     """

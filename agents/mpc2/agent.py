@@ -54,6 +54,8 @@ DEFAULTS = {
     "base_first_fix": True,  # re-solve the window until no week sheds base load to power a fab (``_solve``)
     "bf_passes": 1,  # at most this many re-solves per week
     "cpu_limit": 1.2,  # drop extra scenarios / passes when last week used more than this many seconds
+    "fuel_mult": 1.0,  # ask this multiple of the planned flow on grid-fuel slots (agents/mpc_lp's lever against shed)
+    "long_fuel_days": 0,  # grid fuels with at least this many days of cover get at least naive's flow (0: off)
 }
 PARAMS_FILE = HERE / "params.json"
 PARAMS = {**DEFAULTS, **(json.loads(PARAMS_FILE.read_text()) if PARAMS_FILE.is_file() else {})}
@@ -79,6 +81,13 @@ TINY_OVERRIDES = {
 # against 0.407 (20 episodes, CPU budget on); Tiny and Small keep their settings.
 FULL_OVERRIDES = {
     "bf_passes": 0,
+    # Full's grids shed 425 B$ an episode more than agents/mpc_lp's, which asks 10x the fuel; here full-val (40
+    # episodes, sbf bench) gains +0.0051 [+0.0010, +0.0089] at 10 (+0.0030 at 1.5, +0.0036 at 3); Small: none.
+    "fuel_mult": 10.0,
+    # A grid's nuclear fuel holds a year of cover and arrives 8 weeks after dispatch: the window sees plenty and never
+    # reorders, so on Full (104 weeks) the stock runs out near week 64 and the grid sheds to the end (grid_us: 157k
+    # units an episode against naive's 17k). Naive's flow on these slots keeps the stock up.
+    "long_fuel_days": 90,
 }
 
 
@@ -573,6 +582,23 @@ class Agent:
         self.static = static
         self.seed = int(config["policy_seed"])
         self.started = False
+        # grid fuels: what a grid stocks; the environment clips an oversized request to capacity and stock
+        grids = set(config["layout"]["grids"])
+        fuels = {int(k) for node, k in config["layout"]["stock_slots"] if node in grids}
+        self.fuel_slots = np.array([int(k) in fuels for k in static["action_slots"]["k"]], dtype=bool)
+        self.long_slots = None
+
+    def _long_slots(self, days):
+        """Action slots into a grid of a fuel the grid keeps at least ``days`` of cover of."""
+        inst = self.policy._inst
+        slots = self.static["action_slots"]
+        out = np.zeros(self.n_slots, dtype=bool)
+        for i, (e, k) in enumerate(zip(slots["edge"], slots["k"])):
+            head = inst.nodes[inst.edges[int(e)].head]
+            grid = getattr(head, "grid", None)
+            if grid is not None and float(grid.days_cover.get(int(k), 0.0)) >= days:
+                out[i] = True
+        return out
 
     def act(self, observation):
         obs = self.decoder.decode(observation)
@@ -587,6 +613,16 @@ class Agent:
         if seen is not None and np.asarray(seen).reshape(-1)[0] == 0:
             mask = np.ones_like(flat["flows"])
         flat["flows"] = np.maximum(flat["flows"], 0.0) * mask
+        days = float(self.params.get("long_fuel_days", 0))
+        if days > 0:
+            if self.long_slots is None:
+                self.long_slots = self._long_slots(days)
+            if self.long_slots.any():
+                naive = self._flat(self.policy._fallback.act(obs))["flows"] * mask
+                flat["flows"][self.long_slots] = np.maximum(flat["flows"], naive)[self.long_slots]
+        mult = float(self.params.get("fuel_mult", 1.0))
+        if mult != 1.0:
+            flat["flows"][self.fuel_slots] *= mult
         return flat
 
     def _flat(self, action):

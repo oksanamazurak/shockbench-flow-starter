@@ -138,6 +138,7 @@ DEFAULTS = {
     # 1.0: small-val +0.0043 [+0.0032, +0.0055] (0.25: +0.0038, 0.5: +0.0042), small dev 0.7887 -> 0.8021,
     # full-val +0.0094 [+0.0076, +0.0113] (+0.0085 without long_fuel_days)
     "terminal_scale": 1.0,
+    "grid_hold": 0.0,  # USD per unit of short-cover fuel left at a grid at a week's end (the simulator burns it)
     "sim_scenarios": 0,  # > 0: bf_sim_select scores a plan on this many pre-generated future draws (their mean)
     "early_weeks": 0,  # the first weeks plan a window early_cut weeks shorter (their solve starts cold)
     "early_cut": 0,
@@ -191,6 +192,15 @@ SMALL_OVERRIDES = {
     "bf_search_roundrobin": True,
     "bf_search_every": 1,
     "bf_search_cpu": 0.6,
+    # The LP keeps LNG / coal at a grid while shedding, to power fabs later; the simulator burns it at once. A cost per
+    # unit left at a grid at a week's end makes the plan save fuel upstream instead (``_grid_hold``). small-val
+    # (16 workers): 1e5 +0.0072, 3e5 +0.0082 [+0.0059, +0.0106], 1e6 +0.0073; 1e7 stops fuel shipments. On Full
+    # it hurts (3e5: -0.0060 on full-val): Small only.
+    "grid_hold": 3e5,
+    # With grid_hold the best window is shorter than the package sweep's L + 8: small-val (16 workers) H_extra 6
+    # +0.0027 [+0.0015, +0.0042] (weeks played by naive 12 -> 2), 10: -0.0016, 12: -0.0046; small dev 0.8400 ->
+    # 0.8432 (+0.0032 [+0.0012, +0.0057]). Without grid_hold 6 or 4 lost to 8.
+    "H_extra": 6,
 }
 
 # Full's LP is big: the base-first re-solves took a median 2.3 s a week and up to 12 s, so about 12 % of Full's weeks
@@ -448,7 +458,9 @@ class SignalMpc(MpcDet):
     # ----- the base-first fix: no window week may shed base load to power a fab --------------------------------------
     def _lp(self, inst, models):
         if len(models) == 1:
-            return L.to_highs_lp(models[0], self._terminal(models[0])), L.WindowShape.of(models[0])
+            return L.to_highs_lp(models[0], self._grid_hold(models[0], self._terminal(models[0]))), L.WindowShape.of(
+                models[0]
+            )
         return L.saa_lp(models, L.action_columns(inst, models[0]))
 
     def _sim_arrays(self, model, base):
@@ -504,6 +516,29 @@ class SignalMpc(MpcDet):
         if value is not None and end < self._inst.T:
             cost -= float(np.dot(np.maximum(state.stock, 0.0), value[end]))
         return cost
+
+    def _grid_hold(self, model, c):
+        """A grid in the simulator burns every unit of short-cover fuel (LNG, coal) it holds up to its base load, so
+        the LP's plan to keep such fuel at a grid and shed meanwhile (to power its fabs later) never happens. With
+        ``grid_hold`` > 0 each unit of it left at a grid at a week's end costs that much (USD): fuel is then saved
+        upstream, by shipping later, which the simulator allows. Returns ``c`` (None: unchanged)."""
+        h = float(self.p.get("grid_hold", 0.0))
+        if h <= 0:
+            return c
+        inst = self._inst
+        if not hasattr(self, "_hold_slots"):
+            self._hold_slots = [
+                s for s, st in enumerate(inst.stock_slots)
+                if inst.nodes[st.node].type == "grid"
+                and float(inst.nodes[st.node].grid.days_cover.get(st.k, 0.0)) < 90
+            ]
+        c = np.array(model.objective() if c is None else c, dtype=float, copy=True)
+        for t in range(1, model.T + 1):
+            for s in self._hold_slots:
+                j = model.index.get(("I", t, s))
+                if j is not None:
+                    c[j] += h
+        return c
 
     def _terminal(self, model):
         """The window's objective with the stock left at its end valued at the oracle's mean dual (None: unchanged).

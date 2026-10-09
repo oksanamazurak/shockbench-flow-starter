@@ -38,13 +38,14 @@ itself is the `shockbench-flow` package from PyPI (`>= 0.1.2` in
 agents/<name>/     # one submission folder per agent: agent.py and the files it loads (weights are committed)
                    #   shipped: template (send the maximum), random, heuristic (reads params.json if present)
 examples/          # 01_quickstart.py ... 08_openevolve_agent.py; ppo_agent.py is the PPO submission's agent.py
-evolve/            # OpenEvolve smoke test: tiny seed, one-episode evaluator, OpenAI config
+evolve/            # OpenEvolve: a heuristic seed (evolve/) and rules over mpc2 (evolve/mpc2/), Claude Sonnet via Claude Code
 src/sbf_starter/   # the `sbf` CLI (cli.py), scoring.py, bench.py (sbf bench), check.py (isolated timed run), container.py (--docker),
                    #   codabench.py (token, upload, status), agents.py (names -> folders), play.py (closures)
 benchmarks/        # suites.yaml: the validation benchmark's suites (sbf bench)
 scripts/           # fields_docs.py: regenerates docs/fields/ from the installed shockbench-flow
 docs/              # GUIDE.md, fields/ (every observation and action field), img/
                    #   mpc_lp/: the agents/mpc_lp documentation (design, parameters, experiments, pitfalls)
+                   #   mpc2/: the agents/mpc2 documentation (changes, research, workflows, pitfalls)
 tests/             # uv run pytest -n 3
 outputs/           # run folders outputs/<example>/<date_time>/ and packed zips (gitignored)
 ```
@@ -112,6 +113,9 @@ must respect:
 
 ## Working in this repository
 
+- Working on `agents/mpc2` (the best agent: board small 0.8094, dev small 0.832, dev full 0.672)? Read
+  [docs/mpc2/README.md](docs/mpc2/README.md) first: our changes with their evidence, the research on the score
+  ceiling (the oracle LP is not reachable in the simulator), what failed, and the CPU-budget pitfalls.
 - Working on `agents/mpc_lp` (the LP + heuristic agent, dev small 0.610)? Read
   [docs/mpc_lp/README.md](docs/mpc_lp/README.md) first: its design, every parameter's evidence, what was
   already tried (`experiments.md`) and the pitfalls that cost time (`pitfalls.md`).

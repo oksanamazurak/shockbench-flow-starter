@@ -6,14 +6,13 @@ enforce_evolve_blocks: true
 max_code_length: 10000
 
 llm:
-  api_base: https://api.openai.com/v1
-  api_key: ${OPENAI_API_KEY}
+  provider: claude_code  # `claude -p` with the Claude Code login: no API key
   models:
-    - name: gpt-6.1-sol
+    - name: sonnet
       weight: 1.0
-  reasoning_effort: medium
+      max_budget_usd: 1.0  # cap per `claude -p` call (the CLI rejects an unset one; a top-level value is not passed down)
   max_tokens: 16000
-  timeout: 180
+  timeout: 300
 
 prompt:
   system_message: |

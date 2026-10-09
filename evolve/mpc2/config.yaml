@@ -1,0 +1,53 @@
+max_iterations: 40
+checkpoint_interval: 5
+random_seed: 42
+diff_based_evolution: true
+enforce_evolve_blocks: true
+max_code_length: 20000
+
+llm:
+  provider: claude_code  # `claude -p` with the Claude Code login: no API key
+  models:
+    - name: sonnet
+      weight: 1.0
+      max_budget_usd: 1.0  # cap per `claude -p` call (the CLI rejects an unset one; a top-level value is not passed down)
+  max_tokens: 16000
+  timeout: 300
+
+prompt:
+  system_message: |
+    Change only the code between EVOLVE-BLOCK-START and EVOLVE-BLOCK-END: the function adjust(flows, naive, info,
+    week, mem). Use only Python and numpy. Keep its signature; return one non-negative number per action slot.
+    Never hard-code a length or an index: Small and Full differ (read lengths from flows and info).
+
+    The agent is agents/mpc2, a rolling-horizon LP planner (score 0.77 on the Small board, where 0 is the naive
+    rule and 1 the plan that knew every disruption in advance). adjust corrects its planned flows before they
+    ship. combined_score is the mean saving vs naive, (J_naive - J) / J_naive, on 24 Small episodes with the
+    2 s CPU budget per week; the unchanged planner scores about 0.248. A week over budget or crashing is played
+    by naive.
+
+    What the cost is made of (Small): power shed at grids about 60 %, lost sales at sinks about 37 %; freight,
+    tariffs and holding are under 1 %. Grids burn fuels (LNG, coal, nuclear) by fixed shares; a grid that sheds
+    base load gives its fabs no energy that week (base_first), and a fab without energy starts no wafer lots, so
+    chips go missing at sinks weeks later. Fuel can be stored at the grid (days of cover in info.fuel_days).
+
+    Already tried, no gain: scaling all grid-fuel flows (x1.5 to x30), floors at naive on long-cover fuels (helps
+    Full only), demand inflation, wider scenario sets, longer windows. mpc2 already runs fabs in a planned share of
+    weeks at fuel-short grids. Ideas worth trying: per-slot floors or caps relative to naive by slot type, keeping
+    wafer and chip routes (to_fab, to_sink) at least at naive when mpc2 cuts them, using mem to track what was
+    shipped and react to shortfalls, rules that depend on week (start or end of the episode).
+  num_top_programs: 3
+  num_diverse_programs: 2
+
+database:
+  population_size: 20
+  archive_size: 8
+  num_islands: 2
+  feature_dimensions:
+    - score
+  feature_bins: 6
+
+evaluator:
+  timeout: 900
+  cascade_evaluation: false
+  parallel_evaluations: 1

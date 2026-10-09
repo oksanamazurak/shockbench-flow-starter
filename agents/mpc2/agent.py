@@ -8,6 +8,7 @@ observed age; several quantiles make a two-stage SAA sharing the week-1 action. 
 ends, warnings, threats, tariff notices) adjust every window. The planner's modules ship beside this file as ``sbfv``.
 """
 
+import itertools
 import json
 import math
 import sys
@@ -24,11 +25,86 @@ if str(HERE) not in sys.path:
 from sbfv import marks as M  # noqa: E402
 from sbfv.omega.container import EVENT_FIELDS  # noqa: E402
 from sbfv.oracle import lp as LP  # noqa: E402
+from sbfv.dynamics import sim as SIM  # noqa: E402
 from sbfv.policies import lp_common as L  # noqa: E402
 from sbfv.policies import scenarios as S_  # noqa: E402
 from sbfv.policies.base import StepTelemetry  # noqa: E402
 from sbfv.policies.mpc_det import MpcDet  # noqa: E402
 from sbfv.policies.registry import PolicyContext  # noqa: E402
+
+# A window's rolled instance is new every week, so the SHA-256 of its whole content (``content_digest``, which the
+# builder only compares with itself) cost about 40 % of each week's CPU on Small for nothing: give it a unique label.
+_rolled_window = L.rolled_window
+_ROLLED = itertools.count()
+
+
+def _cheap_rolled_window(inst, obs, H):
+    inst_r, backlog = _rolled_window(inst, obs, H)
+    inst_r._memo.setdefault("content_digest", f"rolled-{next(_ROLLED)}")
+    return inst_r, backlog
+
+
+L.rolled_window = _cheap_rolled_window
+
+# Speed, not results. A basis is kept as HiGHS returns it and turned into status arrays only when next week's window
+# shifts it: the per-element conversion after every solve took about a quarter of each week's CPU on Small, where the
+# fab-week search re-solves the same window with other bounds several times a week.
+_from_basis_arrays = L._from_basis
+L._from_basis = lambda basis: ("raw", basis)
+
+
+def _session_arrays(self):
+    if isinstance(self._col, str):
+        self._col, self._row = _from_basis_arrays(self._row)
+    return self._col, self._row
+
+
+def _warm(self, lp, shape):
+    if self._col is None or self._row is None:
+        return None
+    if shape is None and isinstance(self._col, str):
+        return self._row  # the same window's basis; HiGHS refuses one of another size and starts cold
+    _session_arrays(self)
+    return _warm_arrays(self, lp, shape)
+
+
+_warm_arrays = L.LPSession._warm
+L.LPSession._warm = _warm
+
+
+_to_highs_lp = L.to_highs_lp
+_LP_CACHE = {}
+
+
+def _cached_highs_lp(model, objective=None, offset=None):
+    """``to_highs_lp`` that rebuilds the constraint matrix only when it changes: the fab-week search solves one window
+    with other column bounds and costs, and stacking and copying its matrix took a fifth of each week's CPU."""
+    key = (id(model.A_ub), id(model.A_eq), id(model.b_ub), id(model.b_eq))
+    hit = _LP_CACHE.get("lp")
+    if hit is None or _LP_CACHE.get("key") != key:
+        lp = _to_highs_lp(model, objective, offset)
+        _LP_CACHE.update(key=key, lp=lp, refs=(model.A_ub, model.A_eq, model.b_ub, model.b_eq))
+        return lp
+    inf = L._highspy().kHighsInf
+    lp = hit
+    lp.col_cost_ = np.asarray(model.objective() if objective is None else objective, dtype=np.float64)
+    lp.col_lower_ = np.where(np.isinf(model.lb), -inf, model.lb)
+    lp.col_upper_ = np.where(np.isinf(model.ub), inf, model.ub)
+    lp.offset_ = float(L.model_offset(model) if offset is None else offset)
+    return lp
+
+
+L.to_highs_lp = _cached_highs_lp
+
+
+def _same_structure(model, **changes):
+    """``dataclasses.replace`` of an LP model that keeps its decoded column keys and index (same columns)."""
+    new = replace(model, **changes)
+    for name in ("keys", "index", "eq_names", "ub_names"):
+        if name in model.__dict__:
+            new.__dict__[name] = model.__dict__[name]
+    return new
+
 
 WAR_RISK = ("none", "red_sea", "hormuz_2026")
 TARIFF_CHANNELS = (0, 1, 2)
@@ -56,8 +132,24 @@ DEFAULTS = {
     "cpu_limit": 1.2,  # drop extra scenarios / passes when last week used more than this many seconds
     "fuel_mult": 1.0,  # ask this multiple of the planned flow on grid-fuel slots (agents/mpc_lp's lever against shed)
     "long_fuel_days": 0,  # grid fuels with at least this many days of cover get at least naive's flow (0: off)
+    "bf_adapt": 0.0,  # > 0: on-week share per grid = bf_adapt * (1 - planned shed share), spread evenly
+    # stock left at the window's end is worth this times the oracle's mean dual (terminal_<task>.npz; 0: salvage only).
+    # 1.0: small-val +0.0043 [+0.0032, +0.0055] (0.25: +0.0038, 0.5: +0.0042), small dev 0.7887 -> 0.8021,
+    # full-val +0.0094 [+0.0076, +0.0113] (+0.0085 without long_fuel_days)
+    "terminal_scale": 1.0,
+    "bf_sim_select": False,  # pick bf_search's share by the plan's cost in the vendored simulator, not the LP's
+    "bf_search": [],  # with bf_adapt: shares of fab weeks tried per shedding grid (cheapest window kept); [] off
+    "bf_search_every": 1,  # search every this many weeks, keeping the shares found in between
+    "bf_search_roundrobin": False,  # search one shedding grid a week, in turn, instead of all of them
+    "bf_search_cpu": 1e9,  # skip the search in a week after one that took more CPU seconds than this
+    "bf_cycle": 0,  # > 0: at a grid that sheds, fabs run every bf_cycle-th week (shed priced there), off between
 }
 PARAMS_FILE = HERE / "params.json"
+# per board (keyed by T): the oracle's mean value of a unit of stock per (week, stock slot), scripts/terminal_values.py
+TERMINAL = {}
+for _f in HERE.glob("terminal_*.npz"):
+    _v = np.load(_f)["value"]
+    TERMINAL[_v.shape[0] - 1] = _v
 PARAMS = {**DEFAULTS, **(json.loads(PARAMS_FILE.read_text()) if PARAMS_FILE.is_file() else {})}
 # Tiny's LP is cheap and the window covers most of the episode: two residual quantiles and the early
 # signals help there. They hurt on Small once CPU and decoys enter, so they apply only when T is Tiny's.
@@ -74,6 +166,22 @@ TINY_OVERRIDES = {
     "base_first_fix": True,
     "bf_passes": 2,
     "cpu_limit": 1.55,
+}
+
+# Small: a grid short of fuel sheds every week, so base_first keeps its fabs off all episode. Running them in a share
+# 0.6 * (1 - planned shed share) of the weeks, with shed priced there, lets the fuel build up for them (``_cycle``):
+# small-val (80 episodes) +0.0038 [-0.0000, +0.0075] (0.5: +0.0034, 0.8: -0.0043, 1.0: -0.0162), dev 0.7776 -> 0.7887.
+SMALL_OVERRIDES = {
+    "bf_adapt": 0.6,
+    # the exact rule's clairvoyant schedules (MIP) give grids 6 % to 100 % of fab weeks, not one share for all: per
+    # shedding grid, try these shares and keep the cheapest window. One grid a week, in turn (a flat CPU cost; a search
+    # of every grid every week made the board play 113 weeks by naive), skipped after a slow week.
+    # small-val at 12 workers: six shares round-robin +0.0035 [+0.0018, +0.0055] vs three shares for every grid every
+    # 4th week (itself +0.0052 vs no search at 8 workers; small dev 0.8021 -> 0.8245)
+    "bf_search": [0.0, 0.15, 0.3, 0.5, 0.75, 1.0],
+    "bf_search_roundrobin": True,
+    "bf_search_every": 1,
+    "bf_search_cpu": 0.6,
 }
 
 # Full's LP is big: the base-first re-solves took a median 2.3 s a week and up to 12 s, so about 12 % of Full's weeks
@@ -290,6 +398,7 @@ class SignalMpc(MpcDet):
         inst, t = self._inst, int(obs["week"])
         self._memory.update(inst, obs)
         self._ages.update(inst, obs, self._memory)
+        self._t = t
         H_t = L.window_length(self._H, t, inst.T)
         qs = self._quantiles
         if qs and self._cpu_tight():
@@ -305,6 +414,7 @@ class SignalMpc(MpcDet):
             self._quantiles = saved
         windows = [(self._adjust(arrays, t, H_t), hits) for arrays, hits in windows]
         window = L.rolled_window(inst, obs, H_t)
+        self._window = window
         models = [L.rolled_lp(inst, obs, a, H_t, fab_hits=h, window=window, planning_rules=True) for a, h in windows]
         res = self._solve(inst, models, [a for a, _ in windows])
         if res.ok:
@@ -320,8 +430,60 @@ class SignalMpc(MpcDet):
     # ----- the base-first fix: no window week may shed base load to power a fab --------------------------------------
     def _lp(self, inst, models):
         if len(models) == 1:
-            return L.to_highs_lp(models[0]), L.WindowShape.of(models[0])
+            return L.to_highs_lp(models[0], self._terminal(models[0])), L.WindowShape.of(models[0])
         return L.saa_lp(models, L.action_columns(inst, models[0]))
+
+    def _sim_score(self, model, arrays, res):
+        """The window plan's cost in the vendored simulator (flows and chokepoint releases of every window week), less
+        the stock left at its end at the oracle's mean value (``terminal_<task>.npz``): the simulator applies the rules
+        the LP relaxes (base_first, lots started from every wafer on hand), so plans that are cheap only in the LP lose.
+        About 10 ms for a Small window."""
+        inst_r, backlog = self._window
+        marks = L.window_marks(inst_r, arrays, backlog)
+        state = SIM.initial_state(inst_r)
+        x, index = res.x, model.index
+        first = {}
+        for o, (c, k, e, _lane) in enumerate(inst_r.override_slots):
+            first.setdefault((c, k, e), o)
+        cost = 0.0
+        for t in range(1, model.T + 1):
+            flows = {}
+            for s, (e, k, lane) in enumerate(inst_r.action_slots):
+                j = index.get(("x", t, e, k, lane))
+                if j is not None and x[j] > 1e-9:
+                    flows[s] = float(x[j])
+            ov = {}
+            for (c, k, e), o in first.items():
+                j = index.get(("x", t, e, k, None))
+                if j is not None:
+                    ov[o] = max(float(x[j]), 0.0)
+            cost += SIM.step(inst_r, marks, state, flows, overrides=ov).costs.total()
+        value = TERMINAL.get(int(self._inst.T))
+        end = self._t + model.T - 1
+        if value is not None and end < self._inst.T:
+            cost -= float(np.dot(np.maximum(state.stock, 0.0), value[end]))
+        return cost
+
+    def _terminal(self, model):
+        """The window's objective with the stock left at its end valued at the oracle's mean dual (None: unchanged).
+
+        The window credits that stock at salvage only, so a fuel with a year of cover looks worthless past the window
+        and is never reordered. ``terminal_<task>.npz`` holds, per (week, stock slot), what a unit held at the end of
+        that week saved the clairvoyant plan on average (scripts/terminal_values.py); ``terminal_scale`` weights it.
+        """
+        scale = float(self.p.get("terminal_scale", 0.0))
+        value = TERMINAL.get(int(self._inst.T))
+        if scale <= 0 or value is None:
+            return None
+        end = self._t + model.T - 1  # the window's last week
+        if end >= self._inst.T:
+            return None  # the window reaches the episode's end: the builder's own credit is exact
+        c = np.array(model.objective(), dtype=float, copy=True)
+        for slot in range(value.shape[1]):
+            j = model.index.get(("I", model.T, slot))
+            if j is not None:
+                c[j] = min(c[j], -scale * float(value[end, slot]))
+        return c
 
     def _energy_cells(self, inst, model):
         """Per window week and base_first grid with energy-drawing fabs: (t, go, ysh column, E columns)."""
@@ -347,6 +509,10 @@ class SignalMpc(MpcDet):
         """
         lp, shape = self._lp(inst, models)
         res = self._session.solve(lp, shape)
+        if (int(self.p.get("bf_cycle", 0)) > 0 or float(self.p.get("bf_adapt", 0.0)) > 0) and res.ok:
+            cyc = self._cycle(inst, models, arrays, res)
+            if cyc is not None:
+                return cyc
         passes = int(self.p["bf_passes"]) if self.p["base_first_fix"] else 0
         if passes and self._cpu_tight():
             passes = 1
@@ -390,7 +556,7 @@ class SignalMpc(MpcDet):
                 for i in z0[b]:
                     _, _, _, jE = cells[i]
                     ub[jE] = 0.0
-                fixed.append(replace(model, ub=ub, meta={**model.meta, "priority": prio}))
+                fixed.append(_same_structure(model, ub=ub, meta={**model.meta, "priority": prio}))
             lp, _ = self._lp(inst, fixed)
             new = self._session.solve(lp, None)  # the kept basis as it is: the same week, the same shape
             self._session._shape = shape  # so that next week's solve shifts the basis as usual
@@ -398,6 +564,94 @@ class SignalMpc(MpcDet):
                 break
             res = new
         return res
+
+    def _cycle(self, inst, models, arrays, res):
+        """Fuel is storable and shed costs per unit: a grid short of fuel can shed more in some weeks and none in the
+        others, where its fabs run (base_first gives fabs energy only when no base load is shed). At every grid whose
+        window plan sheds, week w runs its fabs when w % bf_cycle == 0 (shed priced as in ``_solve``) and keeps them
+        off otherwise. One re-solve; None when no grid sheds or the re-solve fails.
+        """
+        model, P, t0 = models[0], int(self.p.get("bf_cycle", 0)), self._t
+        adapt = float(self.p.get("bf_adapt", 0.0))
+        n = len(model.lb)
+        cells = []
+        for go, g in enumerate(inst.grids):
+            if inst.nodes[g].grid.priority != "base_first":
+                continue
+            fos = [fo for fo in inst.grid_fabs[go] if inst.nodes[inst.fabs[fo]].fab.e > 0]
+            if fos:
+                cells += [(t, go, model.index[("ysh", t, go)], [model.index[("E", t, fo)] for fo in fos])
+                          for t in range(1, model.T + 1)]
+        shedding = set()
+        for b in range(len(models)):
+            x, y_bar = res.x[b * n : (b + 1) * n], arrays[b]["y_bar"]
+            shedding |= {go for t, go, jsh, _ in cells if x[jsh] > 1e-3 * max(1.0, float(y_bar[t - 1, go]))}
+        if not shedding:
+            return None
+        price = {go: _base_first_price(inst, model.T, go) for go in shedding}
+        share = {}
+        if adapt > 0:
+            x, y_bar = res.x[:n], arrays[0]["y_bar"]
+            for go in shedding:
+                shed = sum(x[jsh] for t, g, jsh, _ in cells if g == go)
+                load = sum(float(y_bar[t - 1, g]) for t, g, _, _ in cells if g == go)
+                share[go] = min(1.0, max(0.0, adapt * (1.0 - shed / max(load, 1e-9))))
+
+        def on(go, w, share):
+            if adapt > 0:
+                f = share[go]
+                return math.floor((w + 1) * f) > math.floor(w * f)
+            return w % P == 0
+
+        def solve(share):
+            fixed = []
+            for m in models:
+                prio = m.meta.get("priority")
+                prio = np.zeros(n) if prio is None else np.array(prio, dtype=float, copy=True)
+                ub = np.array(m.ub, dtype=float, copy=True)
+                for t, go, jsh, jE in cells:
+                    if go not in shedding:
+                        continue
+                    if on(go, t0 + t - 1, share):
+                        prio[jsh] = price[go]
+                    else:
+                        ub[jE] = 0.0
+                fixed.append(_same_structure(m, ub=ub, meta={**m.meta, "priority": prio}))
+            lp, shape = self._lp(inst, fixed)
+            new = self._session.solve(lp, None)
+            self._session._shape = shape
+            return new if new.ok else None
+
+        kept = getattr(self, "_bf_share", {})
+        share = {go: kept.get(go, f) for go, f in share.items()}  # last search's shares until the next one
+        best = solve(share)
+        sim_select = bool(self.p.get("bf_sim_select")) and len(models) == 1
+        best_score = self._sim_score(model, arrays[0], best) if sim_select and best is not None else None
+        grid_fracs = self.p.get("bf_search") or ()
+        every = max(1, int(self.p.get("bf_search_every", 1)))
+        slow = bool(self.telemetry) and self.telemetry[-1].seconds > float(self.p.get("bf_search_cpu", 1e9))
+        if adapt > 0 and grid_fracs and best is not None and (t0 - 1) % every == 0 and not slow:
+            # the exact rule's schedules (a MIP, too slow per week) give each grid its own share of fab weeks, from
+            # none to all: try each listed share per grid in turn, keep the cheapest window
+            grids = sorted(shedding)
+            if self.p.get("bf_search_roundrobin"):  # one grid a week, in turn: a flat cost every week
+                grids = [grids[(t0 - 1) % len(grids)]]
+            for go in grids:
+                for f in grid_fracs:
+                    if abs(f - share[go]) < 1e-9:
+                        continue
+                    trial = {**share, go: float(f)}
+                    res_f = solve(trial)
+                    if res_f is None:
+                        continue
+                    if sim_select:
+                        score = self._sim_score(model, arrays[0], res_f)
+                        if score < best_score:
+                            best, share, best_score = res_f, trial, score
+                    elif res_f.objective < best.objective:
+                        best, share = res_f, trial
+            self._bf_share = dict(share)
+        return best
 
     def _residual(self, t, el, q):
         age, seen = self._ages.age(t, el)
@@ -565,6 +819,8 @@ class Agent:
                 self.params.update(TINY_OVERRIDES)
             elif T > 60:
                 self.params.update(FULL_OVERRIDES)
+            else:
+                self.params.update(SMALL_OVERRIDES)
         else:
             self.params = {**DEFAULTS, **params}
         LP.FAB_ENERGY_CAP = bool(self.params["fab_energy_cap"])

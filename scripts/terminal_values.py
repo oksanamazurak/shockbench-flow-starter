@@ -19,7 +19,7 @@ from joblib import Parallel, delayed
 from sbf_starter import ROOT
 
 
-def _one(task, root, n):
+def _one(task, root, n, grid_hold=0.0):
     from scipy.optimize import linprog
     from shockbench_flow.disruption.sampler import sample_omega
     from shockbench_flow.hosting.tasks import split_label
@@ -34,7 +34,16 @@ def _one(task, root, n):
     kw = {}
     if m.A_ub.shape[0]:
         kw.update(A_ub=m.A_ub, b_ub=m.b_ub)
-    res = linprog(m.objective(), A_eq=m.A_eq, b_eq=m.b_eq, bounds=np.column_stack([m.lb, m.ub]), method="highs", **kw)
+    c = np.array(m.objective(), dtype=float)
+    if grid_hold:  # as agents/mpc2's grid_hold: LNG left at a grid at a week's end costs grid_hold
+        for s_, st in enumerate(inst.stock_slots):
+            nd = inst.nodes[st.node]
+            if nd.type == "grid" and float(nd.grid.days_cover.get(st.k, 0.0)) < 90:
+                for t_ in range(1, inst.T + 1):
+                    j = m.index.get(("I", t_, s_))
+                    if j is not None:
+                        c[j] += grid_hold
+    res = linprog(c, A_eq=m.A_eq, b_eq=m.b_eq, bounds=np.column_stack([m.lb, m.ub]), method="highs", **kw)
     T, S = inst.T, len(inst.stock_slots)
     value = np.zeros((T + 1, S))
     if res.status != 0:
@@ -51,13 +60,19 @@ def _one(task, root, n):
 
 
 def main(
-    task: str = "small", root: int = 9301, episodes: int = 60, n_jobs: int = 8, out: str | None = None
+    task: str = "small",
+    root: int = 9301,
+    episodes: int = 60,
+    n_jobs: int = 8,
+    out: str | None = None,
+    grid_hold: float = 0.0,
 ) -> None:
     start = time.perf_counter()
     from sbf_starter.bench import _generator
 
     _generator(task, None, n_jobs=n_jobs)
-    vals = [v for v in Parallel(n_jobs=n_jobs)(delayed(_one)(task, root, n) for n in range(episodes)) if v is not None]
+    jobs = (delayed(_one)(task, root, n, grid_hold) for n in range(episodes))
+    vals = [v for v in Parallel(n_jobs=n_jobs)(jobs) if v is not None]
     value = np.mean(vals, axis=0)
     out = ROOT / "agents" / "mpc2" / f"terminal_{task}.npz" if out is None else ROOT / out
     np.savez_compressed(out, value=value, episodes=len(vals), root=root)

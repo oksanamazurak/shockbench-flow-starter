@@ -138,6 +138,7 @@ DEFAULTS = {
     # 1.0: small-val +0.0043 [+0.0032, +0.0055] (0.25: +0.0038, 0.5: +0.0042), small dev 0.7887 -> 0.8021,
     # full-val +0.0094 [+0.0076, +0.0113] (+0.0085 without long_fuel_days)
     "terminal_scale": 1.0,
+    "kind_quantiles": {},  # impairment kind (closure, capacity, prohibition, ...) -> its residual quantile
     "grid_hold": 0.0,  # USD per unit of short-cover fuel left at a grid at a week's end (the simulator burns it)
     "sim_scenarios": 0,  # > 0: bf_sim_select scores a plan on this many pre-generated future draws (their mean)
     "early_weeks": 0,  # the first weeks plan a window early_cut weeks shorter (their solve starts cold)
@@ -182,6 +183,12 @@ TINY_OVERRIDES = {
 # 0.6 * (1 - planned shed share) of the weeks, with shed priced there, lets the fuel build up for them (``_cycle``):
 # small-val (80 episodes) +0.0038 [-0.0000, +0.0075] (0.5: +0.0034, 0.8: -0.0043, 1.0: -0.0162), dev 0.7776 -> 0.7887.
 SMALL_OVERRIDES = {
+    # A route's capacity drop is read as a port strike (median 2 weeks), yet most are a sanction's friendly fire or a
+    # war, which last months: end them at the 0.85 quantile (7 weeks at onset) instead of 0.55. small-val (16
+    # workers) +0.0044 [+0.0030, +0.0058] (0.7: +0.0027, 0.95: +0.0039), root 12345 (48 episodes) +0.0027 [+0.0013,
+    # +0.0042]; small dev -0.0025 [-0.0101, +0.0053]. Reading friendly fire and wars as lasting past the window (their
+    # fixed shares tell them apart) lost to it (-0.0020). On Full it hurts (full-val -0.0023 [-0.0037, -0.0010]).
+    "kind_quantiles": {"capacity": 0.85},
     "bf_adapt": 0.6,
     # the exact rule's clairvoyant schedules (MIP) give grids 6 % to 100 % of fab weeks, not one share for all: per
     # shedding grid, try these shares and keep the cheapest window. One grid a week, in turn (a flat CPU cost; a search
@@ -731,6 +738,9 @@ class SignalMpc(MpcDet):
         return best
 
     def _residual(self, t, el, q):
+        # a kind of impairment may end at its own quantile: a route's capacity loss is read as a port strike (a short
+        # law) whatever its cause
+        q = float((self.p.get("kind_quantiles") or {}).get(el.kind, q))
         age, seen = self._ages.age(t, el)
         key = (el.type_code, age, seen, q)
         if key not in self._residuals:

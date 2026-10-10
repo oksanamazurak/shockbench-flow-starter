@@ -113,7 +113,7 @@ must respect:
 
 ## Working in this repository
 
-- Working on `agents/mpc2` (the best agent: board small 0.8094, dev small 0.832, dev full 0.672)? Read
+- Working on `agents/mpc2` (the best agent: board small 0.8094, dev small 0.844, dev full 0.705)? Read
   [docs/mpc2/README.md](docs/mpc2/README.md) first: our changes with their evidence, the research on the score
   ceiling (the oracle LP is not reachable in the simulator), what failed, and the CPU-budget pitfalls.
 - Working on `agents/mpc_lp` (the LP + heuristic agent, dev small 0.610)? Read
